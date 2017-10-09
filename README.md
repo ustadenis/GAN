@@ -13,4 +13,5 @@ Generative Adversarial Networks
 
 Варианты выполнения:
 1) Реализовать Deep Convolutional Generative Adversarial Networks применительно к задаче генерации изображений машин.
+
 2)Реализовать сеть для генерации рукописного текста.
