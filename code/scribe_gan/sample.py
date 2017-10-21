@@ -30,7 +30,7 @@ def get_style_states(model, args):
         feed = {model.input_data: style_stroke, model.char_seq: style_onehot, model.init_kappa: style_kappa, \
                 model.istate_cell0.c: c0, model.istate_cell1.c: c1, model.istate_cell2.c: c2, \
                 model.istate_cell0.h: h0, model.istate_cell1.h: h1, model.istate_cell2.h: h2}
-        fetch = [model.new_kappa, \
+        fetch = [model.new_kappa_g, \
                  model.fstate_cell0.c, model.fstate_cell1.c, model.fstate_cell2.c,
                  model.fstate_cell0.h, model.fstate_cell1.h, model.fstate_cell2.h]
         [style_kappa, c0, c1, c2, h0, h1, h2] = model.sess.run(fetch, feed)
@@ -40,40 +40,49 @@ def sample(input_text, model, args):
     # initialize some parameters
     one_hot = [to_one_hot(input_text, model.ascii_steps, args.alphabet)]         # convert input string to one-hot vector
     [c0, c1, c2, h0, h1, h2] = get_style_states(model, args) # get numpy zeros states for all three LSTMs
-    kappa = np.zeros((1, args.kmixtures, 1))   # attention mechanism's read head should start at index 0
     prev_x = np.asarray([[[0, 0, 1]]], dtype=np.float32)     # start with a pen stroke at (0,0)
 
     strokes, pis, windows, phis, kappas = [], [], [], [], [] # the data we're going to generate will go here
 
+    [c0d, c1d] = model.sess.run([model.istate_dcell0, model.istate_dcell1])
+    kappa_g = np.zeros((args.batch_size, args.kmixtures, 1))
+    kappa_d = np.zeros((args.batch_size, args.kmixtures, 1))
+
     finished = False ; i = 0
     while not finished:
-        feed = {model.input_data: prev_x, model.char_seq: one_hot, model.init_kappa: kappa, \
+        feed = {model.input_data: prev_x, model.char_seq: one_hot, \
+                model.init_kappa_g: kappa_g, model.init_kappa_d: kappa_d, \
                 model.istate_cell0.c: c0, model.istate_cell1.c: c1, model.istate_cell2.c: c2, \
                 model.istate_cell0.h: h0, model.istate_cell1.h: h1, model.istate_cell2.h: h2}
-        fetch = [model.pi_hat, model.mu1, model.mu2, model.sigma1_hat, model.sigma2_hat, model.rho, model.eos, \
-                 model.window, model.phi, model.new_kappa, model.alpha, \
+
+        fetch = [model.output_gen, \
+                 model.window, model.phi, model.new_kappa_g, model.alpha, \
                  model.fstate_cell0.c, model.fstate_cell1.c, model.fstate_cell2.c,\
-                 model.fstate_cell0.h, model.fstate_cell1.h, model.fstate_cell2.h]
-        [pi_hat, mu1, mu2, sigma1_hat, sigma2_hat, rho, eos, window, phi, kappa, alpha, \
+                 model.fstate_cell0.h, model.fstate_cell1.h, model.fstate_cell2.h,\
+                 ]
+
+        [output_gen, window, phi, kappa, alpha, \
                  c0, c1, c2, h0, h1, h2] = model.sess.run(fetch, feed)
         
-        #bias stuff:
-        sigma1 = np.exp(sigma1_hat - args.bias) ; sigma2 = np.exp(sigma2_hat - args.bias)
-        pi_hat *= 1 + args.bias # apply bias
-        pi = np.zeros_like(pi_hat) # need to preallocate
-        pi[0] = np.exp(pi_hat[0]) / np.sum(np.exp(pi_hat[0]), axis=0) # softmax
-        
-        # choose a component from the MDN
-        idx = np.random.choice(pi.shape[1], p=pi[0])
-        eos = 1 if 0.35 < eos[0][0] else 0 # use 0.5 as arbitrary boundary
-        x1, x2 = sample_gaussian2d(mu1[0][idx], mu2[0][idx], sigma1[0][idx], sigma2[0][idx], rho[0][idx])
+        ##bias stuff:
+        #sigma1 = np.exp(sigma1_hat - args.bias) ; sigma2 = np.exp(sigma2_hat - args.bias)
+        #pi_hat *= 1 + args.bias # apply bias
+        #pi = np.zeros_like(pi_hat) # need to preallocate
+        #pi[0] = np.exp(pi_hat[0]) / np.sum(np.exp(pi_hat[0]), axis=0) # softmax
+        #
+        ## choose a component from the MDN
+        #idx = np.random.choice(pi.shape[1], p=pi[0])
+        #eos = 1 if 0.35 < eos[0][0] else 0 # use 0.5 as arbitrary boundary
+        #x1, x2 = sample_gaussian2d(mu1[0][idx], mu2[0][idx], sigma1[0][idx], sigma2[0][idx], rho[0][idx])
+
+        x1, x2, eos = output_gen[0], output_gen[1], output_gen[2]
             
         # store the info at this time step
         windows.append(window)
         phis.append(phi[0])
         kappas.append(kappa[0].T)
         pis.append(pi[0])
-        strokes.append([mu1[0][idx], mu2[0][idx], sigma1[0][idx], sigma2[0][idx], rho[0][idx], eos])
+        strokes.append([x1, x2, eos])
         
         # test if finished (has the read head seen the whole ascii sequence?)
         # main_kappa_idx = np.where(alpha[0]==np.max(alpha[0]));
@@ -111,33 +120,6 @@ def window_plots(phis, windows, save_path='.'):
     plt.xlabel("one-hot vector", fontsize=15)
     plt.ylabel("time steps", fontsize=15)
     plt.imshow(windows, interpolation='nearest', aspect='auto', cmap=cm.jet)
-    plt.savefig(save_path)
-    plt.clf() ; plt.cla()
-
-# a heatmap for the probabilities of each pen point in the sequence
-def gauss_plot(strokes, title, figsize = (20,2), save_path='.'):
-    import matplotlib.mlab as mlab
-    import matplotlib.cm as cm
-    import matplotlib as mpl
-    mpl.use('Agg')
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=figsize) #
-    buff = 1 ; epsilon = 1e-4
-    minx, maxx = np.min(strokes[:,0])-buff, np.max(strokes[:,0])+buff
-    miny, maxy = np.min(strokes[:,1])-buff, np.max(strokes[:,1])+buff
-    delta = abs(maxx-minx)/400. ;
-
-    x = np.arange(minx, maxx, delta)
-    y = np.arange(miny, maxy, delta)
-    X, Y = np.meshgrid(x, y)
-    Z = np.zeros_like(X)
-    for i in range(strokes.shape[0]):
-        gauss = mlab.bivariate_normal(X, Y, mux=strokes[i,0], muy=strokes[i,1], \
-            sigmax=strokes[i,2], sigmay=strokes[i,3], sigmaxy=0) # sigmaxy=strokes[i,4] gives error
-        Z += gauss/(np.max(gauss) + epsilon)
-
-    plt.title(title, fontsize=20)
-    plt.imshow(Z)
     plt.savefig(save_path)
     plt.clf() ; plt.cla()
 

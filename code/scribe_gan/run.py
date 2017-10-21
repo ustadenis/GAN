@@ -19,6 +19,7 @@ def main():
     parser.add_argument('--tsteps', type=int, default=150, help='RNN time steps (for backprop)')
     parser.add_argument('--nmixtures', type=int, default=8, help='number of gaussian mixtures')
     parser.add_argument('--d_layers', type=int, default=2, help='number of layers in discriminator')
+    parser.add_argument('--d_steps', type=int, default=1, help='number of discriminator train steps for every single generator train step')
 
     # window params
     parser.add_argument('--kmixtures', type=int, default=1, help='number of gaussian mixtures for character window')
@@ -76,7 +77,10 @@ def train_model(args):
     logger.write("training...")
     model.sess.run(tf.assign(model.decay, args.decay ))
     model.sess.run(tf.assign(model.momentum, args.momentum ))
-    running_average = 0.0 ; remember_rate = 0.99
+    
+    running_average_g = 0.0
+    running_average_d = 0.0
+    remember_rate = 0.99
     for e in range(global_step//args.nbatches, args.nepochs):
         model.sess.run(tf.assign(model.learning_rate, args.learning_rate * (args.lr_decay ** e)))
         logger.write("learning rate: {}".format(model.learning_rate.eval()))
@@ -85,9 +89,9 @@ def train_model(args):
         h0, h1, h2 = model.istate_cell0.h.eval(), model.istate_cell1.h.eval(), model.istate_cell2.h.eval()
 
 
-        c0d, c1d = model.istate_dcell0.c.eval(), model.istate_dcell1.c.eval()
-        h0d, h1d = model.istate_dcell0.h.eval(), model.istate_dcell1.h.eval()
-        kappa = np.zeros((args.batch_size, args.kmixtures, 1))
+        [c0d, c1d] = model.sess.run([model.istate_dcell0, model.istate_dcell1])
+        kappa_g = np.zeros((args.batch_size, args.kmixtures, 1))
+        kappa_d = np.zeros((args.batch_size, args.kmixtures, 1))
 
         for b in range(global_step%args.nbatches, args.nbatches):
             i = e * args.nbatches + b
@@ -99,22 +103,29 @@ def train_model(args):
             start = time.time()
             x, y, s, c = data_loader.next_batch()
 
-            feed = {model.input_data: x, model.target_data: y, model.char_seq: c, model.init_kappa: kappa, \
+            feed = {model.input_data: x, model.target_data: y, model.char_seq: c, \
+                    model.init_kappa_g: kappa_g, model.init_kappa_d: kappa_d, \
                     model.istate_cell0.c: c0, model.istate_cell1.c: c1, model.istate_cell2.c: c2, \
                     model.istate_cell0.h: h0, model.istate_cell1.h: h1, model.istate_cell2.h: h2, \
-                    model.istate_dcell0.c: c0d, model.istate_dcell1.c: c1d, \
-                    model.istate_dcell0.h: h0d, model.istate_dcell1.h: h2d}
+                    model.istate_dcell0: c0d, model.istate_dcell1: c1d }
 
-            [train_loss, _] = model.sess.run([model.cost, model.train_op], feed)
+            for _ in range(args.d_steps):
+                [train_loss_d, _] = model.sess.run([model.cost_d, model.train_op_d], feed)
+                feed[model.init_kappa_d] = np.zeros((args.batch_size, args.kmixtures, 1))
+                running_average_d = running_average_d*remember_rate + train_loss_d*(1-remember_rate)
+                #print('loss d:', train_loss_d)
+
+            [train_loss_g, _] = model.sess.run([model.cost_g, model.train_op_g], feed)
+            #print('loss g', train_loss_g)
             feed.update(valid_inputs)
-            feed[model.init_kappa] = np.zeros((args.batch_size, args.kmixtures, 1))
-            [valid_loss] = model.sess.run([model.cost], feed)
+            feed[model.init_kappa_g] = np.zeros((args.batch_size, args.kmixtures, 1))
+            [valid_loss_g] = model.sess.run([model.cost_g], feed)
 
-            running_average = running_average*remember_rate + train_loss*(1-remember_rate)
+            running_average_g = running_average_g*remember_rate + train_loss_g*(1-remember_rate)
 
             end = time.time()
             if i % 10 is 0: logger.write("{}/{}, loss = {:.3f}, regloss = {:.5f}, valid_loss = {:.3f}, time = {:.3f}" \
-                    .format(i, args.nepochs * args.nbatches, train_loss, running_average, valid_loss, end - start) )
+                    .format(i, args.nepochs * args.nbatches, train_loss_g, running_average_g, valid_loss_g, end - start) )
 
 
 def sample_model(args, logger=None):
@@ -139,11 +150,9 @@ def sample_model(args, logger=None):
             strokes, phis, windows, kappas = sample(s, model, args)
 
             w_save_path = '{}figures/iter-{}-w-{}'.format(args.log_dir, global_step, s[:10].replace(' ', '_'))
-            g_save_path = '{}figures/iter-{}-g-{}'.format(args.log_dir, global_step, s[:10].replace(' ', '_'))
             l_save_path = '{}figures/iter-{}-l-{}'.format(args.log_dir, global_step, s[:10].replace(' ', '_'))
 
             window_plots(phis, windows, save_path=w_save_path)
-            gauss_plot(strokes, 'Heatmap for "{}"'.format(s), figsize = (2*len(s),4), save_path=g_save_path)
             line_plot(strokes, 'Line plot for "{}"'.format(s), figsize = (len(s),2), save_path=l_save_path)
 
             # make sure that kappas are reasonable

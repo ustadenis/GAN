@@ -216,6 +216,8 @@ def to_one_hot(s, ascii_steps, alphabet):
 # abstraction for logging
 class Logger():
     def __init__(self, args):
+        if not os.path.exists(args.log_dir):
+            os.mkdir(args.log_dir)
         self.logf = '{}train_scribe.txt'.format(args.log_dir) if args.train else '{}sample_scribe.txt'.format(args.log_dir)
         with open(self.logf, 'w') as f: f.write("Scribe: Realistic Handriting in Tensorflow\n     by Sam Greydanus\n\n\n")
 

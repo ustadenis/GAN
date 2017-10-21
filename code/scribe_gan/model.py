@@ -35,7 +35,7 @@ class Model():
 
         self.logger.write('\tusing alphabet{}'.format(self.alphabet))
         self.char_vec_len = len(self.alphabet) + 1 #plus one for <UNK> token
-        self.ascii_steps = args.tsteps/args.tsteps_per_ascii
+        self.ascii_steps = args.tsteps//args.tsteps_per_ascii
 
 
         # ----- build the basic recurrent network architecture
@@ -49,8 +49,8 @@ class Model():
                 self.cell1 = tf.contrib.rnn.DropoutWrapper(self.cell1, output_keep_prob = self.dropout)
                 self.cell2 = tf.contrib.rnn.DropoutWrapper(self.cell2, output_keep_prob = self.dropout)
 
-        self.input_data = tf.placeholder(dtype=tf.float32, shape=[None, self.tsteps, 3])
-        self.target_data = tf.placeholder(dtype=tf.float32, shape=[None, self.tsteps, 3])
+        self.input_data = tf.placeholder(dtype=tf.float32, shape=[None, self.tsteps, 3], name='input')
+        self.target_data = tf.placeholder(dtype=tf.float32, shape=[None, self.tsteps, 3], name='target')
         self.istate_cell0 = self.cell0.zero_state(batch_size=self.batch_size, dtype=tf.float32)
         self.istate_cell1 = self.cell1.zero_state(batch_size=self.batch_size, dtype=tf.float32)
         self.istate_cell2 = self.cell2.zero_state(batch_size=self.batch_size, dtype=tf.float32)
@@ -67,6 +67,9 @@ class Model():
             # c -> [? x ascii_steps x alphabet] and is a tf matrix
             ascii_steps = c.get_shape()[1].value #number of items in sequence
             phi = get_phi(ascii_steps, alpha, beta, kappa)
+            #phishape = tf.shape(phi)
+            #chsape = tf.shape(c)
+            #phi = tf.Print(phi, [phishape, chsape])
             window = tf.matmul(phi,c)
             window = tf.squeeze(window, [1]) # window ~ [?,alphabet]
             return window, phi
@@ -94,8 +97,9 @@ class Model():
             kappa = kappa + prev_kappa
             return alpha, beta, kappa # each ~ [?,kmixtures,1]
 
-        self.init_kappa_g = tf.placeholder(dtype=tf.float32, shape=[None, self.kmixtures, 1])
-        self.char_seq = tf.placeholder(dtype=tf.float32, shape=[None, self.ascii_steps, self.char_vec_len])
+        self.init_kappa_d = tf.placeholder(dtype=tf.float32, shape=[None, self.kmixtures, 1], name='kappa_d')
+        self.init_kappa_g = tf.placeholder(dtype=tf.float32, shape=[None, self.kmixtures, 1], name='kappa_g')
+        self.char_seq = tf.placeholder(dtype=tf.float32, shape=[None, self.ascii_steps, self.char_vec_len], name='char_seq')
         prev_kappa = self.init_kappa_g
         prev_window = self.char_seq[:,0,:]
 
@@ -116,7 +120,6 @@ class Model():
         self.new_kappa_g = new_kappa
         self.alpha = alpha
 
-
         # ----- finish building LSTMs 2 and 3
         outs_cell1, self.fstate_cell1 = tf.contrib.legacy_seq2seq.rnn_decoder(outs_cell0, self.istate_cell1, self.cell1, loop_function=None, scope='cell1')
 
@@ -130,7 +133,7 @@ class Model():
             coord_b = tf.get_variable("output_b", [n_out], initializer=self.graves_initializer)
 
         out_cell2 = tf.reshape(tf.concat(outs_cell2, 1), [-1, args.rnn_size]) #concat outputs for efficiency
-        output_gen = tf.nn.xw_plus_b(out_cell2, coord_w, coord_b)
+        self.output_gen = tf.nn.xw_plus_b(out_cell2, coord_w, coord_b)
 
         ## ----- start building the Mixture Density Network on top (start with a dense layer to predict the MDN params)
         #n_out = 1 + self.nmixtures * 6 # params = end_of_stroke + 6 parameters per Gaussian
@@ -184,8 +187,12 @@ class Model():
         #    return [eos, pi, mu1, mu2, sigma1, sigma2, rho]
 
         def discriminator(input_data):
+            #slice the input volume into separate vols for each tstep
+            inputs = [tf.squeeze(input_, [0]) for input_ in tf.split(input_data, self.tsteps, 0)]
+
             dcell0 = tf.contrib.rnn.LSTMCell(args.rnn_size, state_is_tuple=True, initializer=self.graves_initializer)
-            dcell = tf.contrib.rnn.LSTMCell(args.rnn_size, state_is_tuple=True, initializer=self.graves_initializer)
+            dcell1_size = args.rnn_size + self.char_vec_len + int(inputs[0].shape[-1])
+            dcell = tf.contrib.rnn.LSTMCell(dcell1_size, state_is_tuple=True, initializer=self.graves_initializer)
 
             if (self.train and self.dropout < 1): # training mode
                 dcell0 = tf.contrib.rnn.DropoutWrapper(dcell0, output_keep_prob = self.dropout)
@@ -193,15 +200,15 @@ class Model():
 
             self.istate_dcell0 = dcell0.zero_state(batch_size=self.batch_size, dtype=tf.float32)
 
-            #slice the input volume into separate vols for each tstep
-            inputs = [tf.squeeze(input_, [1]) for input_ in tf.split(input_data, self.tsteps, 1)]
             #build dcell0 computational graph
-            outs_dcell0, self.fstate_dcell0 = tf.contrib.legacy_seq2seq.rnn_decoder(input_data, self.istate_dcell0, dcell0, loop_function=None)
+            outs_dcell0, self.fstate_dcell0 = tf.nn.dynamic_rnn(dcell0, input_data, initial_state=self.istate_dcell0, time_major=True)
+
+            outs_dcell0 = [tf.squeeze(output_, [0]) for output_ in tf.split(outs_dcell0, self.tsteps, 0)]
 
             #add gaussian window result
             reuse = False
             prev_kappa = self.init_kappa_d
-            for i in range(len(outs_dcell0)):
+            for i in range(self.tsteps):
                 [alpha, beta, new_kappa] = get_window_params(i, outs_dcell0[i], self.kmixtures, prev_kappa, reuse=reuse)
                 window, phi = get_window(alpha, beta, new_kappa, self.char_seq)
                 outs_dcell0[i] = tf.concat((outs_dcell0[i],window), 1) #concat outputs
@@ -212,27 +219,34 @@ class Model():
 
             self.new_kappa_d = new_kappa
 
+            outs_dcell0 = tf.stack(outs_dcell0, 0)
+
             stacked_dcell = tf.nn.rnn_cell.MultiRNNCell([dcell for _ in range(self.d_layers)], state_is_tuple=True)
             self.istate_dcell1 = stacked_dcell.zero_state(self.batch_size, tf.float32)
-            dcell_outputs, self.fstate_dcell1 = tf.nn.rnn(stacked_dcell, outs_dcell0, initial_state=self.istate_dcell1)
+            dcell_outputs, self.fstate_dcell1 = tf.nn.dynamic_rnn(stacked_dcell, outs_dcell0, initial_state=self.istate_dcell1, time_major=True)
             n_out = 1
             with tf.variable_scope('coord_discriminator'):
-                coord_w = tf.get_variable("output_w", [self.rnn_size, n_out], initializer=self.graves_initializer)
+                coord_w = tf.get_variable("output_w", [dcell1_size, n_out], initializer=self.graves_initializer)
                 coord_b = tf.get_variable("output_b", [n_out], initializer=self.graves_initializer)
 
-            dcell_outputs = tf.reshape(tf.concat(dcell_outputs, 1), [-1, args.rnn_size]) #concat outputs for efficiency
+            dcell_outputs = tf.reshape(tf.concat(dcell_outputs, 1), [-1, dcell1_size]) #concat outputs for efficiency
             prob = tf.sigmoid(tf.nn.xw_plus_b(dcell_outputs, coord_w, coord_b))
+            #prob = tf.Print(prob, [prob])
             return prob
 
         with tf.variable_scope('D') as scope:
-            print('aaaaaa')
-            print(output_gen.shape)
-            input_gen = tf.concat([inputs, output_gen], 1)
+            output_data = tf.reshape(self.output_gen, [self.batch_size, self.tsteps, 3])
+            input_gen = tf.concat([self.input_data, output_data], 2)
+            input_gen = tf.transpose(input_gen, perm=[1, 0, 2])
+            #input_gen = tf.Print(input_gen, [input_gen], message='gen', summarize=18)
             self.d_gen = discriminator(input_gen)
+
             scope.reuse_variables()
+            
             flat_target_data = tf.reshape(self.target_data,[-1, 3])
-            input_real = tf.concat([inputs, flat_target_data], 1)
-            print(flat_target_data.shape)
+            input_real = tf.concat([self.input_data, self.target_data], 2)
+            input_real = tf.transpose(input_real, perm=[1, 0, 2])
+            #input_real = tf.Print(input_real, [input_real], message='real', summarize=18)
             self.d_real = discriminator(input_real)
 
         # reshape target data (as we did the input data)
@@ -244,10 +258,10 @@ class Model():
         d_loss = tf.reduce_mean(-tf.log(tf.clip_by_value(self.d_gen, 1e-1000000, 1.0)) \
                                 -tf.log(1 - tf.clip_by_value(self.d_real, 0.0, 1.0-1e-1000000)))
 
-        self.d_cost = d_loss / (self.batch_size * self.tsteps)
+        self.cost_d = d_loss / (self.batch_size * self.tsteps)
 
         g_loss = tf.reduce_mean(-tf.log(tf.clip_by_value(self.d_gen, 1e-1000000, 1.0)))
-        self.g_cost = g_loss / (self.batch_size * self.tsteps)
+        self.cost_g = g_loss / (self.batch_size * self.tsteps)
 
         #loss = get_loss(self.pi, x1_data, x2_data, eos_data, self.mu1, self.mu2, self.sigma1, self.sigma2, self.rho, self.eos)
         #self.cost = loss / (self.batch_size * self.tsteps)
@@ -257,9 +271,12 @@ class Model():
         self.decay = tf.Variable(0.0, trainable=False)
         self.momentum = tf.Variable(0.0, trainable=False)
 
-        tvars = tf.trainable_variables()
-        d_grads, _ = tf.clip_by_global_norm(tf.gradients(self.d_cost, tvars), self.grad_clip)
-        g_grads, _ = tf.clip_by_global_norm(tf.gradients(self.g_cost, tvars), self.grad_clip)
+        self.d_gen = tf.Print(self.d_gen, [self.d_gen, self.d_real])
+
+        tvars_d = [v for v in tf.trainable_variables() if v.name.startswith('D/')]
+        tvars_g = [v for v in tf.trainable_variables() if not v.name.startswith('D/')]
+        d_grads, _ = tf.clip_by_global_norm(tf.gradients(self.cost_d, tvars_d), self.grad_clip)
+        g_grads, _ = tf.clip_by_global_norm(tf.gradients(self.cost_g, tvars_g), self.grad_clip)
 
         if args.optimizer == 'adam':
             self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
@@ -267,8 +284,9 @@ class Model():
             self.optimizer = tf.train.RMSPropOptimizer(learning_rate=self.learning_rate, decay=self.decay, momentum=self.momentum)
         else:
             raise ValueError("Optimizer type not recognized")
-        self.train_op_d = self.optimizer.apply_gradients(zip(d_grads, tvars))
-        self.train_op_g = self.optimizer.apply_gradients(zip(g_grads, tvars))
+
+        self.train_op_d = self.optimizer.apply_gradients(zip(d_grads, tvars_d))
+        self.train_op_g = self.optimizer.apply_gradients(zip(g_grads, tvars_g))
 
         # ----- some TensorFlow I/O
         self.sess = tf.InteractiveSession()
