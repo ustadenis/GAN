@@ -94,9 +94,9 @@ class Model():
             kappa = kappa + prev_kappa
             return alpha, beta, kappa # each ~ [?,kmixtures,1]
 
-        self.init_kappa = tf.placeholder(dtype=tf.float32, shape=[None, self.kmixtures, 1]) 
+        self.init_kappa_g = tf.placeholder(dtype=tf.float32, shape=[None, self.kmixtures, 1])
         self.char_seq = tf.placeholder(dtype=tf.float32, shape=[None, self.ascii_steps, self.char_vec_len])
-        prev_kappa = self.init_kappa
+        prev_kappa = self.init_kappa_g
         prev_window = self.char_seq[:,0,:]
 
         #add gaussian window result
@@ -113,7 +113,7 @@ class Model():
         #save some attention mechanism params (useful for sampling/debugging later)
         self.window = window
         self.phi = phi
-        self.new_kappa = new_kappa
+        self.new_kappa_g = new_kappa
         self.alpha = alpha
 
 
@@ -122,74 +122,85 @@ class Model():
 
         outs_cell2, self.fstate_cell2 = tf.contrib.legacy_seq2seq.rnn_decoder(outs_cell1, self.istate_cell2, self.cell2, loop_function=None, scope='cell2')
 
-        # ----- start building the Mixture Density Network on top (start with a dense layer to predict the MDN params)
-        n_out = 1 + self.nmixtures * 6 # params = end_of_stroke + 6 parameters per Gaussian
-        with tf.variable_scope('mdn_dense'):
-            mdn_w = tf.get_variable("output_w", [self.rnn_size, n_out], initializer=self.graves_initializer)
-            mdn_b = tf.get_variable("output_b", [n_out], initializer=self.graves_initializer)
+
+        # x1 and x2
+        n_out = 3
+        with tf.variable_scope('lstm_to_coord'):
+            coord_w = tf.get_variable("output_w", [self.rnn_size, n_out], initializer=self.graves_initializer)
+            coord_b = tf.get_variable("output_b", [n_out], initializer=self.graves_initializer)
 
         out_cell2 = tf.reshape(tf.concat(outs_cell2, 1), [-1, args.rnn_size]) #concat outputs for efficiency
-        output = tf.nn.xw_plus_b(out_cell2, mdn_w, mdn_b) #data flows through dense nn
+        output_gen = tf.nn.xw_plus_b(out_cell2, coord_w, coord_b)
+
+        ## ----- start building the Mixture Density Network on top (start with a dense layer to predict the MDN params)
+        #n_out = 1 + self.nmixtures * 6 # params = end_of_stroke + 6 parameters per Gaussian
+        #with tf.variable_scope('mdn_dense'):
+        #    mdn_w = tf.get_variable("output_w", [self.rnn_size, n_out], initializer=self.graves_initializer)
+        #    mdn_b = tf.get_variable("output_b", [n_out], initializer=self.graves_initializer)
+
+        #out_cell2 = tf.reshape(tf.concat(outs_cell2, 1), [-1, args.rnn_size]) #concat outputs for efficiency
+        #output = tf.nn.xw_plus_b(out_cell2, mdn_w, mdn_b) #data flows through dense nn
 
 
-        # ----- build mixture density cap on top of second recurrent cell
-        def gaussian2d(x1, x2, mu1, mu2, s1, s2, rho):
-            # define gaussian mdn (eq 24, 25 from http://arxiv.org/abs/1308.0850)
-            x_mu1 = tf.subtract(x1, mu1)
-            x_mu2 = tf.subtract(x2, mu2)
-            Z = tf.square(tf.div(x_mu1, s1)) + \
-                tf.square(tf.div(x_mu2, s2)) - \
-                2*tf.div(tf.multiply(rho, tf.multiply(x_mu1, x_mu2)), tf.multiply(s1, s2))
-            rho_square_term = 1-tf.square(rho)
-            power_e = tf.exp(tf.div(-Z,2*rho_square_term))
-            regularize_term = 2*np.pi*tf.multiply(tf.multiply(s1, s2), tf.sqrt(rho_square_term))
-            gaussian = tf.div(power_e, regularize_term)
-            return gaussian
+        ## ----- build mixture density cap on top of second recurrent cell
+        #def gaussian2d(x1, x2, mu1, mu2, s1, s2, rho):
+        #    # define gaussian mdn (eq 24, 25 from http://arxiv.org/abs/1308.0850)
+        #    x_mu1 = tf.subtract(x1, mu1)
+        #    x_mu2 = tf.subtract(x2, mu2)
+        #    Z = tf.square(tf.div(x_mu1, s1)) + \
+        #        tf.square(tf.div(x_mu2, s2)) - \
+        #        2*tf.div(tf.multiply(rho, tf.multiply(x_mu1, x_mu2)), tf.multiply(s1, s2))
+        #    rho_square_term = 1-tf.square(rho)
+        #    power_e = tf.exp(tf.div(-Z,2*rho_square_term))
+        #    regularize_term = 2*np.pi*tf.multiply(tf.multiply(s1, s2), tf.sqrt(rho_square_term))
+        #    gaussian = tf.div(power_e, regularize_term)
+        #    return gaussian
 
-        def get_loss(pi, x1_data, x2_data, eos_data, mu1, mu2, sigma1, sigma2, rho, eos):
-            # define loss function (eq 26 of http://arxiv.org/abs/1308.0850)
-            gaussian = gaussian2d(x1_data, x2_data, mu1, mu2, sigma1, sigma2, rho)
-            term1 = tf.multiply(gaussian, pi)
-            term1 = tf.reduce_sum(term1, 1, keep_dims=True) #do inner summation
-            term1 = -tf.log(tf.maximum(term1, 1e-20)) # some errors are zero -> numerical errors.
+        #def get_loss(pi, x1_data, x2_data, eos_data, mu1, mu2, sigma1, sigma2, rho, eos):
+        #    # define loss function (eq 26 of http://arxiv.org/abs/1308.0850)
+        #    gaussian = gaussian2d(x1_data, x2_data, mu1, mu2, sigma1, sigma2, rho)
+        #    term1 = tf.multiply(gaussian, pi)
+        #    term1 = tf.reduce_sum(term1, 1, keep_dims=True) #do inner summation
+        #    term1 = -tf.log(tf.maximum(term1, 1e-20)) # some errors are zero -> numerical errors.
 
-            term2 = tf.multiply(eos, eos_data) + tf.multiply(1-eos, 1-eos_data) #modified Bernoulli -> eos probability
-            term2 = -tf.log(term2) #negative log error gives loss
+        #    term2 = tf.multiply(eos, eos_data) + tf.multiply(1-eos, 1-eos_data) #modified Bernoulli -> eos probability
+        #    term2 = -tf.log(term2) #negative log error gives loss
 
-            return tf.reduce_sum(term1 + term2) #do outer summation
+        #    return tf.reduce_sum(term1 + term2) #do outer summation
 
-        # now transform dense NN outputs into params for MDN
-        def get_mdn_coef(Z):
-            # returns the tf slices containing mdn dist params (eq 18...23 of http://arxiv.org/abs/1308.0850)
-            eos_hat = Z[:, 0:1] #end of sentence tokens
-            pi_hat, mu1_hat, mu2_hat, sigma1_hat, sigma2_hat, rho_hat = tf.split(Z[:, 1:], 6, 1)
-            self.pi_hat, self.sigma1_hat, self.sigma2_hat = pi_hat, sigma1_hat, sigma2_hat # these are useful for bias method during sampling
+        ## now transform dense NN outputs into params for MDN
+        #def get_mdn_coef(Z):
+        #    # returns the tf slices containing mdn dist params (eq 18...23 of http://arxiv.org/abs/1308.0850)
+        #    eos_hat = Z[:, 0:1] #end of sentence tokens
+        #    pi_hat, mu1_hat, mu2_hat, sigma1_hat, sigma2_hat, rho_hat = tf.split(Z[:, 1:], 6, 1)
+        #    self.pi_hat, self.sigma1_hat, self.sigma2_hat = pi_hat, sigma1_hat, sigma2_hat # these are useful for bias method during sampling
 
-            eos = tf.sigmoid(-1*eos_hat) # technically we gained a negative sign
-            pi = tf.nn.softmax(pi_hat) # softmax z_pi:
-            mu1 = mu1_hat; mu2 = mu2_hat # leave mu1, mu2 as they are
-            sigma1 = tf.exp(sigma1_hat); sigma2 = tf.exp(sigma2_hat) # exp for sigmas
-            rho = tf.tanh(rho_hat) # tanh for rho (squish between -1 and 1)rrr
+        #    eos = tf.sigmoid(-1*eos_hat) # technically we gained a negative sign
+        #    pi = tf.nn.softmax(pi_hat) # softmax z_pi:
+        #    mu1 = mu1_hat; mu2 = mu2_hat # leave mu1, mu2 as they are
+        #    sigma1 = tf.exp(sigma1_hat); sigma2 = tf.exp(sigma2_hat) # exp for sigmas
+        #    rho = tf.tanh(rho_hat) # tanh for rho (squish between -1 and 1)rrr
 
-            return [eos, pi, mu1, mu2, sigma1, sigma2, rho]
+        #    return [eos, pi, mu1, mu2, sigma1, sigma2, rho]
 
         def discriminator(input_data):
-            dcell0 = tf.tf.contrib.rnn.LSTMCell(args.rnn_size, state_is_tuple=True, initializer=self.graves_initializer)
-            dcell = tf.tf.contrib.rnn.LSTMCell(args.rnn_size, state_is_tuple=True, initializer=self.graves_initializer)
-            
+            dcell0 = tf.contrib.rnn.LSTMCell(args.rnn_size, state_is_tuple=True, initializer=self.graves_initializer)
+            dcell = tf.contrib.rnn.LSTMCell(args.rnn_size, state_is_tuple=True, initializer=self.graves_initializer)
+
             if (self.train and self.dropout < 1): # training mode
                 dcell0 = tf.contrib.rnn.DropoutWrapper(dcell0, output_keep_prob = self.dropout)
                 dcell = tf.contrib.rnn.DropoutWrapper(dcell, output_keep_prob = self.dropout)
 
-            istate_dcell0 = dcell0.zero_state(batch_size=self.batch_size, dtype=tf.float32)
+            self.istate_dcell0 = dcell0.zero_state(batch_size=self.batch_size, dtype=tf.float32)
 
             #slice the input volume into separate vols for each tstep
             inputs = [tf.squeeze(input_, [1]) for input_ in tf.split(input_data, self.tsteps, 1)]
             #build dcell0 computational graph
-            outs_dcell0, fstate_dcell0 = tf.contrib.legacy_seq2seq.rnn_decoder(input_data, istate_dcell0, dcell0, loop_function=None)
+            outs_dcell0, self.fstate_dcell0 = tf.contrib.legacy_seq2seq.rnn_decoder(input_data, self.istate_dcell0, dcell0, loop_function=None)
 
             #add gaussian window result
             reuse = False
+            prev_kappa = self.init_kappa_d
             for i in range(len(outs_dcell0)):
                 [alpha, beta, new_kappa] = get_window_params(i, outs_dcell0[i], self.kmixtures, prev_kappa, reuse=reuse)
                 window, phi = get_window(alpha, beta, new_kappa, self.char_seq)
@@ -199,21 +210,47 @@ class Model():
                 prev_window = window
                 reuse = True
 
+            self.new_kappa_d = new_kappa
+
             stacked_dcell = tf.nn.rnn_cell.MultiRNNCell([dcell for _ in range(self.d_layers)], state_is_tuple=True)
-            stacked_dcell_state = stacked_dcell.zero_state(self.batch_size, tf.float32)
-            outputs, state = tf.nn.rnn(stacked_dcell, outs_dcell0, initial_state=stacked_dcell_state)
+            self.istate_dcell1 = stacked_dcell.zero_state(self.batch_size, tf.float32)
+            dcell_outputs, self.fstate_dcell1 = tf.nn.rnn(stacked_dcell, outs_dcell0, initial_state=self.istate_dcell1)
+            n_out = 1
+            with tf.variable_scope('coord_discriminator'):
+                coord_w = tf.get_variable("output_w", [self.rnn_size, n_out], initializer=self.graves_initializer)
+                coord_b = tf.get_variable("output_b", [n_out], initializer=self.graves_initializer)
+
+            dcell_outputs = tf.reshape(tf.concat(dcell_outputs, 1), [-1, args.rnn_size]) #concat outputs for efficiency
+            prob = tf.sigmoid(tf.nn.xw_plus_b(dcell_outputs, coord_w, coord_b))
+            return prob
 
         with tf.variable_scope('D') as scope:
-            self.d1, self.d1_state = discriminator(
+            print('aaaaaa')
+            print(output_gen.shape)
+            input_gen = tf.concat([inputs, output_gen], 1)
+            self.d_gen = discriminator(input_gen)
+            scope.reuse_variables()
+            flat_target_data = tf.reshape(self.target_data,[-1, 3])
+            input_real = tf.concat([inputs, flat_target_data], 1)
+            print(flat_target_data.shape)
+            self.d_real = discriminator(input_real)
 
         # reshape target data (as we did the input data)
-        flat_target_data = tf.reshape(self.target_data,[-1, 3])
-        [x1_data, x2_data, eos_data] = tf.split(flat_target_data, 3, 1) #we might as well split these now
+        #flat_target_data = tf.reshape(self.target_data,[-1, 3])
+        #[x1_data, x2_data, eos_data] = tf.split(flat_target_data, 3, 1) #we might as well split these now
 
-        [self.eos, self.pi, self.mu1, self.mu2, self.sigma1, self.sigma2, self.rho] = get_mdn_coef(output)
+        #[self.eos, self.pi, self.mu1, self.mu2, self.sigma1, self.sigma2, self.rho] = get_mdn_coef(output)
 
-        loss = get_loss(self.pi, x1_data, x2_data, eos_data, self.mu1, self.mu2, self.sigma1, self.sigma2, self.rho, self.eos)
-        self.cost = loss / (self.batch_size * self.tsteps)
+        d_loss = tf.reduce_mean(-tf.log(tf.clip_by_value(self.d_gen, 1e-1000000, 1.0)) \
+                                -tf.log(1 - tf.clip_by_value(self.d_real, 0.0, 1.0-1e-1000000)))
+
+        self.d_cost = d_loss / (self.batch_size * self.tsteps)
+
+        g_loss = tf.reduce_mean(-tf.log(tf.clip_by_value(self.d_gen, 1e-1000000, 1.0)))
+        self.g_cost = g_loss / (self.batch_size * self.tsteps)
+
+        #loss = get_loss(self.pi, x1_data, x2_data, eos_data, self.mu1, self.mu2, self.sigma1, self.sigma2, self.rho, self.eos)
+        #self.cost = loss / (self.batch_size * self.tsteps)
 
         # ----- bring together all variables and prepare for training
         self.learning_rate = tf.Variable(0.0, trainable=False)
@@ -221,7 +258,8 @@ class Model():
         self.momentum = tf.Variable(0.0, trainable=False)
 
         tvars = tf.trainable_variables()
-        grads, _ = tf.clip_by_global_norm(tf.gradients(self.cost, tvars), self.grad_clip)
+        d_grads, _ = tf.clip_by_global_norm(tf.gradients(self.d_cost, tvars), self.grad_clip)
+        g_grads, _ = tf.clip_by_global_norm(tf.gradients(self.g_cost, tvars), self.grad_clip)
 
         if args.optimizer == 'adam':
             self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)
@@ -229,7 +267,8 @@ class Model():
             self.optimizer = tf.train.RMSPropOptimizer(learning_rate=self.learning_rate, decay=self.decay, momentum=self.momentum)
         else:
             raise ValueError("Optimizer type not recognized")
-        self.train_op = self.optimizer.apply_gradients(zip(grads, tvars))
+        self.train_op_d = self.optimizer.apply_gradients(zip(d_grads, tvars))
+        self.train_op_g = self.optimizer.apply_gradients(zip(g_grads, tvars))
 
         # ----- some TensorFlow I/O
         self.sess = tf.InteractiveSession()
