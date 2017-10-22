@@ -35,7 +35,7 @@ def main():
 
     parser.add_argument('--grad_clip', type=float, default=10., help='clip gradients to this magnitude')
     parser.add_argument('--optimizer', type=str, default='rmsprop', help="ctype of optimizer: 'rmsprop' 'adam'")
-    parser.add_argument('--learning_rate', type=float, default=1e-4, help='learning rate')
+    parser.add_argument('--learning_rate', type=float, default=1e-1, help='learning rate')
     parser.add_argument('--lr_decay', type=float, default=1.0, help='decay rate for learning rate')
     parser.add_argument('--decay', type=float, default=0.95, help='decay rate for rmsprop')
     parser.add_argument('--momentum', type=float, default=0.9, help='momentum for rmsprop')
@@ -93,6 +93,8 @@ def train_model(args):
         kappa_g = np.zeros((args.batch_size, args.kmixtures, 1))
         kappa_d = np.zeros((args.batch_size, args.kmixtures, 1))
 
+        last_loss_g = 0.0
+        last_loss_d = 999.0
         for b in range(global_step%args.nbatches, args.nbatches):
             i = e * args.nbatches + b
             if global_step is not 0 : i+=1 ; global_step = 0
@@ -110,12 +112,19 @@ def train_model(args):
                     model.istate_dcell0: c0d, model.istate_dcell1: c1d }
 
             for _ in range(args.d_steps):
+                if last_loss_g > 10.0 or last_loss_d < 0.001:
+                    [train_loss_d] = model.sess.run([model.cost_d], feed)
+                    last_loss_d = train_loss_d
+                    #print('skipping d')
+                    break
                 [train_loss_d, _] = model.sess.run([model.cost_d, model.train_op_d], feed)
+                last_loss_d = train_loss_d
                 feed[model.init_kappa_d] = np.zeros((args.batch_size, args.kmixtures, 1))
                 running_average_d = running_average_d*remember_rate + train_loss_d*(1-remember_rate)
                 #print('loss d:', train_loss_d)
 
             [train_loss_g, _] = model.sess.run([model.cost_g, model.train_op_g], feed)
+            last_loss_g = train_loss_g
             #print('loss g', train_loss_g)
             feed.update(valid_inputs)
             feed[model.init_kappa_g] = np.zeros((args.batch_size, args.kmixtures, 1))
@@ -124,8 +133,8 @@ def train_model(args):
             running_average_g = running_average_g*remember_rate + train_loss_g*(1-remember_rate)
 
             end = time.time()
-            if i % 10 is 0: logger.write("{}/{}, loss = {:.3f}, regloss = {:.5f}, valid_loss = {:.3f}, time = {:.3f}" \
-                    .format(i, args.nepochs * args.nbatches, train_loss_g, running_average_g, valid_loss_g, end - start) )
+            if i % 10 is 0: logger.write("{}/{}, loss_g = {:.6f}, regloss_g = {:.6f}, valid_loss_g = {:.6f}, loss_d = {:.6f} time = {:.3f}" \
+                    .format(i, args.nepochs * args.nbatches, train_loss_g, running_average_g, valid_loss_g, last_loss_d, end - start) )
 
 
 def sample_model(args, logger=None):
