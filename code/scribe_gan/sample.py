@@ -42,11 +42,11 @@ def sample(input_text, model, args):
     [c0, c1, c2, h0, h1, h2] = get_style_states(model, args) # get numpy zeros states for all three LSTMs
     prev_x = np.asarray([[[0, 0, 1]]], dtype=np.float32)     # start with a pen stroke at (0,0)
 
-    strokes, pis, windows, phis, kappas = [], [], [], [], [] # the data we're going to generate will go here
+    strokes, windows, phis, kappas = [], [], [], [] # the data we're going to generate will go here
 
     [c0d, c1d] = model.sess.run([model.istate_dcell0, model.istate_dcell1])
-    kappa_g = np.zeros((args.batch_size, args.kmixtures, 1))
-    kappa_d = np.zeros((args.batch_size, args.kmixtures, 1))
+    kappa_g = np.zeros((1, args.kmixtures, 1))
+    kappa_d = np.zeros((1, args.kmixtures, 1))
 
     finished = False ; i = 0
     while not finished:
@@ -75,13 +75,12 @@ def sample(input_text, model, args):
         #eos = 1 if 0.35 < eos[0][0] else 0 # use 0.5 as arbitrary boundary
         #x1, x2 = sample_gaussian2d(mu1[0][idx], mu2[0][idx], sigma1[0][idx], sigma2[0][idx], rho[0][idx])
 
-        x1, x2, eos = output_gen[0], output_gen[1], output_gen[2]
-            
+        x1, x2, eos = output_gen[0][0], output_gen[0][1], output_gen[0][2]
+
         # store the info at this time step
         windows.append(window)
         phis.append(phi[0])
         kappas.append(kappa[0].T)
-        pis.append(pi[0])
         strokes.append([x1, x2, eos])
         
         # test if finished (has the read head seen the whole ascii sequence?)
