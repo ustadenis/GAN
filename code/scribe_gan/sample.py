@@ -64,17 +64,6 @@ def sample(input_text, model, args):
         [output_gen, window, phi, kappa, alpha, \
                  c0, c1, c2, h0, h1, h2] = model.sess.run(fetch, feed)
         
-        ##bias stuff:
-        #sigma1 = np.exp(sigma1_hat - args.bias) ; sigma2 = np.exp(sigma2_hat - args.bias)
-        #pi_hat *= 1 + args.bias # apply bias
-        #pi = np.zeros_like(pi_hat) # need to preallocate
-        #pi[0] = np.exp(pi_hat[0]) / np.sum(np.exp(pi_hat[0]), axis=0) # softmax
-        #
-        ## choose a component from the MDN
-        #idx = np.random.choice(pi.shape[1], p=pi[0])
-        #eos = 1 if 0.35 < eos[0][0] else 0 # use 0.5 as arbitrary boundary
-        #x1, x2 = sample_gaussian2d(mu1[0][idx], mu2[0][idx], sigma1[0][idx], sigma2[0][idx], rho[0][idx])
-
         x1, x2, eos = output_gen[0][0], output_gen[0][1], output_gen[0][2]
 
         # store the info at this time step

@@ -17,7 +17,6 @@ def main():
     parser.add_argument('--sample', dest='train', action='store_false', help='sample from the model')
     parser.add_argument('--rnn_size', type=int, default=100, help='size of RNN hidden state')
     parser.add_argument('--tsteps', type=int, default=150, help='RNN time steps (for backprop)')
-    parser.add_argument('--nmixtures', type=int, default=8, help='number of gaussian mixtures')
     parser.add_argument('--d_layers', type=int, default=2, help='number of layers in discriminator')
     parser.add_argument('--d_steps', type=int, default=1, help='number of discriminator train steps for every single generator train step')
 
@@ -169,7 +168,7 @@ def sample_model(args, logger=None):
     else:
         logger.write("load failed, sampling canceled")
 
-    if True:
+    if False:
         tf.reset_default_graph()
         time.sleep(args.sleep_time)
         sample_model(args, logger=logger)

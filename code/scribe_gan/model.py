@@ -17,7 +17,6 @@ class Model():
         # model params
         self.rnn_size = args.rnn_size
         self.train = args.train
-        self.nmixtures = args.nmixtures
         self.kmixtures = args.kmixtures
         self.batch_size = args.batch_size if self.train else 1 # training/sampling specific
         self.tsteps = args.tsteps if self.train else 1 # training/sampling specific
@@ -125,15 +124,21 @@ class Model():
         outs_cell1, self.fstate_cell1 = tf.contrib.legacy_seq2seq.rnn_decoder(outs_cell0, self.istate_cell1, self.cell1, loop_function=None, scope='cell1')
 
         outs_cell2, self.fstate_cell2 = tf.contrib.legacy_seq2seq.rnn_decoder(outs_cell1, self.istate_cell2, self.cell2, loop_function=None, scope='cell2')
-
+ 
         # x1 and x2
         n_out = 3
-        with tf.variable_scope('lstm_to_coord'):
-            coord_w = tf.get_variable("output_w", [self.rnn_size, n_out], initializer=self.graves_initializer)
-            coord_b = tf.get_variable("output_b", [n_out], initializer=self.graves_initializer)
+        lin_outs = []
 
-        out_cell2 = tf.reshape(tf.concat(outs_cell2, 1), [-1, args.rnn_size]) #concat outputs for efficiency
-        self.output_gen = tf.nn.xw_plus_b(out_cell2, coord_w, coord_b)
+        for i in range(self.tsteps):
+            with tf.variable_scope('lstm_to_coord') as scope:
+                if i > 0:
+                    scope.reuse_variables()
+                coord_w = tf.get_variable("output_w", [self.rnn_size, n_out], initializer=self.graves_initializer)
+                coord_b = tf.get_variable("output_b", [n_out], initializer=self.graves_initializer)
+
+            lin_outs.append(tf.nn.xw_plus_b(outs_cell2[i], coord_w, coord_b))
+
+        self.output_gen = tf.concat(lin_outs, 0)
 
         def discriminator(input_data):
             #slice the input volume into separate vols for each tstep
@@ -202,34 +207,34 @@ class Model():
             #input_gen = tf.Print(input_gen, [input_gen[0][0], input_gen[1][0], input_gen[2][0]], message='gen', summarize=18)
             self.d_gen = discriminator(input_gen)
             #self.d_gen = tf.Print(self.d_gen, [self.d_gen], message='gen')
-            #self.d_gen = tf.verify_tensor_all_finite(self.d_gen, 'dgen')
+            self.d_gen = tf.verify_tensor_all_finite(self.d_gen, 'd_gen')
 
             scope.reuse_variables()
             
             #input_real = tf.concat([self.input_data, self.target_data], 2)
             input_real = self.input_data
             input_real = tf.transpose(input_real, perm=[1, 0, 2])
-            #input_real = tf.Print(input_real, [input_real[0], input_real[1], input_real[2]], message='real', summarize=1000)
+            #input_real = tf.Print(input_real, [input_real[0][0], input_real[1][0], input_real[2][0]], message='real', summarize=18)
             self.d_real = discriminator(input_real)
+            self.d_real = tf.verify_tensor_all_finite(self.d_real, 'd_real')
+
             #self.d_real = tf.Print(self.d_real, [self.d_real], message='real')
 
         # reshape target data (as we did the input data)
 
         d_loss = tf.reduce_mean(-tf.log(tf.clip_by_value(self.d_gen, 1e-5, 1.0)) \
                 -tf.log(tf.clip_by_value((1 - self.d_real), 1e-5, 1.0)))
+        d_loss = tf.verify_tensor_all_finite(d_loss, 'd_loss')
 
         self.cost_d = d_loss# / (self.batch_size * self.tsteps)
 
-
         g_loss = tf.clip_by_value((1 - self.d_gen), 1e-5, 1.0)
         g_loss = -tf.log(g_loss)
-        g_loss = tf.verify_tensor_all_finite(g_loss, 'gloss_log')
+        g_loss = tf.verify_tensor_all_finite(g_loss, 'g_loss_log')
         g_loss = tf.reduce_mean(g_loss)
-        #g_loss = tf.verify_tensor_all_finite(g_loss, 'gloss_mean')
+        #g_loss = tf.verify_tensor_all_finite(g_loss, 'g_loss_mean')
         self.cost_g = g_loss# / (self.batch_size * self.tsteps)
 
-        #loss = get_loss(self.pi, x1_data, x2_data, eos_data, self.mu1, self.mu2, self.sigma1, self.sigma2, self.rho, self.eos)
-        #self.cost = loss / (self.batch_size * self.tsteps)
 
         # ----- bring together all variables and prepare for training
         self.learning_rate = tf.Variable(0.0, trainable=False)
