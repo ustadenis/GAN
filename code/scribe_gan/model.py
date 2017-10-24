@@ -20,6 +20,7 @@ class Model():
         self.kmixtures = args.kmixtures
         self.batch_size = args.batch_size if self.train else 1 # training/sampling specific
         self.tsteps = args.tsteps if self.train else 1 # training/sampling specific
+        self.g_noise_size = args.g_noise_size
         self.alphabet = args.alphabet
         self.d_layers = args.d_layers
         # training params
@@ -102,7 +103,7 @@ class Model():
         prev_kappa = self.init_kappa_g
         prev_window = self.char_seq[:,0,:]
 
-        #add gaussian window result
+        #add gaussian window result and noise
         reuse = False
         for i in range(len(outs_cell0)):
             [alpha, beta, new_kappa] = get_window_params(i, outs_cell0[i], self.kmixtures, prev_kappa, reuse=reuse)
@@ -110,6 +111,10 @@ class Model():
             window, phi = get_window(alpha, beta, new_kappa, self.char_seq)
             outs_cell0[i] = tf.concat((outs_cell0[i],window), 1) #concat outputs
             outs_cell0[i] = tf.concat((outs_cell0[i],inputs[i]), 1) #concat input data
+
+            random_input = tf.random_uniform(shape=[self.batch_size, self.g_noise_size], minval=0.0, maxval=1.0)
+            outs_cell0[i] = tf.concat((outs_cell0[i],random_input), 1)
+
             prev_kappa = new_kappa
             prev_window = window
             reuse = True
@@ -136,7 +141,9 @@ class Model():
                 coord_w = tf.get_variable("output_w", [self.rnn_size, n_out], initializer=self.graves_initializer)
                 coord_b = tf.get_variable("output_b", [n_out], initializer=self.graves_initializer)
 
-            lin_outs.append(tf.nn.xw_plus_b(outs_cell2[i], coord_w, coord_b))
+            lin_out = tf.nn.xw_plus_b(outs_cell2[i], coord_w, coord_b)
+            x1, x2, eos_prob = lin_out[:, 0], lin_out[:, 1], tf.sigmoid(-1*lin_out[:, 2])
+            lin_outs.append(tf.stack([x1, x2, eos_prob], 1))
 
         self.output_gen = tf.concat(lin_outs, 0)
 
@@ -204,7 +211,7 @@ class Model():
             input_gen = output_data
             input_gen = tf.transpose(input_gen, perm=[1, 0, 2])
             #input_gen = tf.Print(input_gen, [input_gen], message='gen', summarize=18)
-            #input_gen = tf.Print(input_gen, [input_gen[0][0], input_gen[1][0], input_gen[2][0]], message='gen', summarize=18)
+            #input_gen = tf.Print(input_gen, [input_gen[0][0], input_gen[0][1], input_gen[0][2]], message='gen', summarize=18)
             self.d_gen = discriminator(input_gen)
             #self.d_gen = tf.Print(self.d_gen, [self.d_gen], message='gen')
             self.d_gen = tf.verify_tensor_all_finite(self.d_gen, 'd_gen')
@@ -222,13 +229,13 @@ class Model():
 
         # reshape target data (as we did the input data)
 
-        d_loss = tf.reduce_mean(-tf.log(tf.clip_by_value(self.d_gen, 1e-5, 1.0)) \
-                -tf.log(tf.clip_by_value((1 - self.d_real), 1e-5, 1.0)))
+        d_loss = tf.reduce_mean(-tf.log(tf.clip_by_value(self.d_real, 1e-5, 1.0)) \
+                -tf.log(tf.clip_by_value((1 - self.d_gen), 1e-5, 1.0)))
         d_loss = tf.verify_tensor_all_finite(d_loss, 'd_loss')
 
         self.cost_d = d_loss# / (self.batch_size * self.tsteps)
 
-        g_loss = tf.clip_by_value((1 - self.d_gen), 1e-5, 1.0)
+        g_loss = tf.clip_by_value(self.d_gen, 1e-5, 1.0)
         g_loss = -tf.log(g_loss)
         g_loss = tf.verify_tensor_all_finite(g_loss, 'g_loss_log')
         g_loss = tf.reduce_mean(g_loss)
@@ -243,8 +250,14 @@ class Model():
 
         tvars_d = [v for v in tf.trainable_variables() if v.name.startswith('D/')]
         tvars_g = [v for v in tf.trainable_variables() if not v.name.startswith('D/')]
+
+        gg = tf.gradients(self.cost_g, tvars_g)
+
+        #for i in range(len(gg)):
+        #    gg[i] = tf.Print(gg[i], [gg[i]], '{}:'.format(i), summarize=100)
+
         d_grads, _ = tf.clip_by_global_norm(tf.gradients(self.cost_d, tvars_d), self.grad_clip)
-        g_grads, _ = tf.clip_by_global_norm(tf.gradients(self.cost_g, tvars_g), self.grad_clip)
+        g_grads, _ = tf.clip_by_global_norm(gg, self.grad_clip)
 
         if args.optimizer == 'adam':
             self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate)

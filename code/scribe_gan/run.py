@@ -17,6 +17,7 @@ def main():
     parser.add_argument('--sample', dest='train', action='store_false', help='sample from the model')
     parser.add_argument('--rnn_size', type=int, default=100, help='size of RNN hidden state')
     parser.add_argument('--tsteps', type=int, default=150, help='RNN time steps (for backprop)')
+    parser.add_argument('--g_noise_size', type=int, default=100, help='size of noise vector for generator')
     parser.add_argument('--d_layers', type=int, default=2, help='number of layers in discriminator')
     parser.add_argument('--d_steps', type=int, default=1, help='number of discriminator train steps for every single generator train step')
 
@@ -111,7 +112,7 @@ def train_model(args):
                     model.istate_dcell0: c0d, model.istate_dcell1: c1d }
 
             for _ in range(args.d_steps):
-                if last_loss_g > 10.0 or last_loss_d < 0.001:
+                if last_loss_g > 7.0 or last_loss_d < 0.001:
                     [train_loss_d] = model.sess.run([model.cost_d], feed)
                     last_loss_d = train_loss_d
                     #print('skipping d')
