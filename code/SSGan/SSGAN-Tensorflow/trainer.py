@@ -133,7 +133,7 @@ class Trainer(object):
 
         max_steps = 1000000
 
-        output_save_step = 1000
+        output_save_step = 500
         test_sample_step = 100
 
         for s in xrange(max_steps):
