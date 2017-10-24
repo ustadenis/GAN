@@ -14,3 +14,4 @@ Generative Adversarial Networks
 Варианты выполнения:
 1) Реализовать Deep Convolutional Generative Adversarial Networks применительно к задаче генерации изображений машин.
 2) Реализовать сеть для генерации рукописного текста.
+3) Исследовать Semi-Supervised версию GAN (SSGAN) и возможность ее применения к задаче генерации изображений машин. 

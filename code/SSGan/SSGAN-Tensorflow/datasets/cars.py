@@ -55,7 +55,7 @@ class Dataset(object):
 
 
 def get_data_info():
-    return np.array([32, 32, 10, 3])
+    return np.array([32, 32, 196, 3])
 
 
 def get_conv_info():
@@ -69,7 +69,7 @@ def get_deconv_info():
 def create_default_splits(is_train=True):
     ids = all_ids()
 
-    num_trains = 5
+    num_trains = 400
 
     dataset_train = Dataset(ids[:num_trains], name='train', is_train=False)
     dataset_test = Dataset(ids[num_trains:], name='test', is_train=False)
